@@ -74,7 +74,10 @@ const progressSchema = new mongoose.Schema({
     ref: 'Quiz',
     required: true
   },
-  attempts: [attemptSchema],
+  attempts: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Attempt'
+  }],
   bestScore: {
     type: Number,
     default: 0

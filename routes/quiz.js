@@ -2,6 +2,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Quiz = require('../models/Quiz');
+const Class = require('../models/Class');
 const { Progress, Attempt } = require('../models/Progress');
 const GameState = require('../models/GameState');
 const aiService = require('../services/aiService');
@@ -20,33 +21,152 @@ const authenticateToken = async (req, res, next) => {
     const user = await User.findById(decoded.userId);
     
     if (!user) {
+      console.log('❌ User not found with ID:', decoded.userId);
       return res.status(404).json({ message: 'User not found' });
     }
 
     req.user = user;
     next();
   } catch (error) {
-    console.error('Token verification error:', error);
+    console.error('❌ Token verification error:', error.message);
     res.status(401).json({ message: 'Invalid token' });
   }
 };
 
-// Get available quizzes for students
+// Get available quizzes for students (filtered by enrolled classes)
 router.get('/available', authenticateToken, async (req, res) => {
   try {
     if (req.user.role !== 'student') {
       return res.status(403).json({ message: 'Only students can view available quizzes' });
     }
 
-    const quizzes = await Quiz.find({ isActive: true })
-      .select('title description totalQuestions timeLimit topics createdAt stats')
+    // Get student's enrolled class IDs
+    const enrolledClassIds = req.user.enrolledClasses
+      .filter(ec => ec.isActive)
+      .map(ec => ec.class);
+
+    const quizzes = await Quiz.find({ 
+      isActive: true,
+      class: { $in: enrolledClassIds }
+    })
+      .select('title description totalQuestions timeLimit topics createdAt stats class')
       .populate('instructor', 'name')
+      .populate('class', 'name code')
       .sort({ createdAt: -1 });
 
     res.json({ quizzes });
   } catch (error) {
     console.error('Get available quizzes error:', error);
     res.status(500).json({ message: 'Error fetching quizzes' });
+  }
+});
+
+// Get quizzes for a specific class
+router.get('/class/:classId', authenticateToken, async (req, res) => {
+  try {
+    const { classId } = req.params;
+
+    if (!classId || classId === 'undefined' || classId === 'null') {
+      return res.status(400).json({
+        message: 'Invalid class ID provided',
+        receivedId: classId
+      });
+    }
+
+    // Check if user has access to this class
+    let hasAccess = false;
+    
+    if (req.user.role === 'instructor') {
+      // Check if instructor owns this class
+      const Class = require('../models/Class');
+      const classExists = await Class.findOne({
+        _id: classId,
+        instructor: req.user._id,
+        isActive: true
+      });
+      hasAccess = !!classExists;
+    } else if (req.user.role === 'student') {
+      // Check if student is enrolled in this class
+      hasAccess = req.user.enrolledClasses.some(ec => 
+        ec.class.toString() === classId && ec.isActive
+      );
+    }
+
+    if (!hasAccess) {
+      return res.status(403).json({ message: 'Access denied to this class' });
+    }
+
+    // Get quizzes for this class
+    const quizzes = await Quiz.find({ 
+      class: classId,
+      isActive: true
+    })
+      .select('title description totalQuestions timeLimit topics createdAt stats adaptiveMode adaptiveSettings')
+      .populate('instructor', 'name email')
+      .populate('class', 'name code')
+      .sort({ createdAt: -1 });
+
+    res.json({ 
+      quizzes,
+      class: quizzes.length > 0 ? quizzes[0].class : null,
+      totalQuizzes: quizzes.length
+    });
+  } catch (error) {
+    console.error('Get class quizzes error:', error);
+    res.status(500).json({ message: 'Error fetching class quizzes' });
+  }
+});
+
+// Get instructor's quizzes for a specific class
+router.get('/instructor/class/:classId', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'instructor') {
+      return res.status(403).json({ message: 'Only instructors can view their class quizzes' });
+    }
+
+    const { classId } = req.params;
+
+    if (!classId || classId === 'undefined' || classId === 'null') {
+      return res.status(400).json({
+        message: 'Invalid class ID provided',
+        receivedId: classId
+      });
+    }
+
+    // Verify the class belongs to the instructor
+    const Class = require('../models/Class');
+    const classExists = await Class.findOne({
+      _id: classId,
+      instructor: req.user._id,
+      isActive: true
+    });
+
+    if (!classExists) {
+      return res.status(404).json({ message: 'Class not found or access denied' });
+    }
+
+    // Get all quizzes for this class (including inactive ones for management)
+    const quizzes = await Quiz.find({ 
+      class: classId
+    })
+      .select('title description totalQuestions timeLimit topics createdAt stats isActive adaptiveMode adaptiveSettings')
+      .populate('class', 'name code')
+      .sort({ createdAt: -1 });
+
+    res.json({ 
+      quizzes,
+      class: {
+        id: classExists._id,
+        name: classExists.name,
+        code: classExists.code,
+        description: classExists.description
+      },
+      totalQuizzes: quizzes.length,
+      activeQuizzes: quizzes.filter(q => q.isActive).length
+    });
+  } catch (error) {
+    console.error('Get instructor class quizzes error:', error);
+    res.status(500).json({ message: 'Error fetching instructor class quizzes' });
   }
 });
 
@@ -59,13 +179,28 @@ router.post('/start/:quizId', authenticateToken, async (req, res) => {
 
     // Validate quizId parameter
     const { quizId } = req.params;
+    
     if (!quizId || quizId === 'undefined' || quizId === 'null') {
-      return res.status(400).json({ message: 'Invalid quiz ID provided' });
+      return res.status(400).json({ 
+        message: 'Invalid quiz ID provided',
+        receivedId: quizId,
+        expectedFormat: '/api/quiz/start/:quizId'
+      });
     }
 
-    const quiz = await Quiz.findById(quizId);
+    const quiz = await Quiz.findById(quizId).populate('class');
     if (!quiz) {
+      console.log('❌ Quiz not found with ID:', quizId);
       return res.status(404).json({ message: 'Quiz not found' });
+    }
+
+    // Check if student is enrolled in the class
+    const isEnrolled = req.user.enrolledClasses.some(ec => 
+      ec.class.toString() === quiz.class._id.toString() && ec.isActive
+    );
+
+    if (!isEnrolled) {
+      return res.status(403).json({ message: 'You are not enrolled in this class' });
     }
 
     // Check if quiz is active
@@ -104,19 +239,29 @@ router.post('/start/:quizId', authenticateToken, async (req, res) => {
       quiz: quiz._id,
       answers: [],
       totalQuestions: quiz.totalQuestions,
-      timeSpent: 0
+      timeSpent: 0,
+      correctAnswers: 0,
+      isCompleted: false
     });
 
     await attempt.save();
 
-    // Add attempt to progress
+    // Add attempt to progress (store the full attempt object, not just the ID)
     progress.attempts.push(attempt._id);
     progress.totalAttempts += 1;
     progress.lastAttempt = new Date();
+    
+    // Save progress
     await progress.save();
 
     // Get first question (adaptive or random)
-    const firstQuestion = quiz.questions[0]; // For now, start with first question
+    let firstQuestion;
+    if (quiz.settings.adaptiveMode) {
+      // Find the first easy question for adaptive tests
+      firstQuestion = quiz.questions.find(q => q.difficulty === 'easy') || quiz.questions[0];
+    } else {
+      firstQuestion = quiz.questions[0];
+    }
 
     res.json({
       message: 'Quiz started successfully',
@@ -125,7 +270,9 @@ router.post('/start/:quizId', authenticateToken, async (req, res) => {
         id: quiz._id,
         title: quiz.title,
         totalQuestions: quiz.totalQuestions,
-        timeLimit: quiz.timeLimit
+        timeLimit: quiz.timeLimit,
+        adaptiveMode: quiz.settings.adaptiveMode,
+        adaptiveSettings: quiz.settings.adaptiveSettings
       },
       currentQuestion: firstQuestion,
       questionNumber: 1,
@@ -409,5 +556,173 @@ async function updateGameState(userId, attempt, quiz) {
     return null;
   }
 }
+
+// Test Gemini API endpoint (for development/testing purposes)
+router.get('/test-gemini', async (req, res) => {
+  try {
+    console.log('🧪 Testing Gemini API...');
+    
+    // Test simple prompt
+    const testPrompt = "Hello! Please respond with 'Gemini API is working correctly!' if you can read this.";
+    
+    const result = await aiService.gemini.generateContent(testPrompt);
+    const response = await result.response;
+    const text = response.text();
+
+    // Test quiz generation capability
+    const quizPrompt = `
+      Generate 2 simple quiz questions about JavaScript. Return a JSON array with this format:
+      [
+        {
+          "questionId": "q1",
+          "text": "What is JavaScript?",
+          "type": "multiple-choice",
+          "options": [
+            {"text": "A programming language", "isCorrect": true},
+            {"text": "A markup language", "isCorrect": false}
+          ],
+          "correctAnswer": "A programming language",
+          "topic": "JavaScript Basics",
+          "difficulty": "easy",
+          "explanation": "JavaScript is a programming language",
+          "points": 5
+        }
+      ]
+    `;
+
+    const quizResult = await aiService.gemini.generateContent(quizPrompt);
+    const quizResponse = await quizResult.response;
+    const quizText = quizResponse.text();
+
+    res.json({
+      status: 'success',
+      message: 'Gemini API is working correctly!',
+      tests: {
+        basicConnection: {
+          status: 'passed',
+          response: text.trim()
+        },
+        quizGeneration: {
+          status: 'passed',
+          response: quizText.trim()
+        }
+      },
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Gemini API test failed:', error);
+    
+    res.status(500).json({
+      status: 'error',
+      message: 'Gemini API test failed',
+      error: error.message,
+      suggestions: [
+        'Check if GEMINI_API_KEY is set in your .env file',
+        'Verify the API key is correct and has proper permissions',
+        'Ensure you have enabled the Gemini API in Google Cloud Console',
+        'Check your API quota and billing settings'
+      ],
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Get next adaptive question based on performance
+router.get('/adaptive/next/:attemptId', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'student') {
+      return res.status(403).json({ message: 'Only students can take adaptive quizzes' });
+    }
+
+    const { attemptId } = req.params;
+    const attempt = await Attempt.findById(attemptId).populate('quiz');
+    
+    if (!attempt) {
+      return res.status(404).json({ message: 'Attempt not found' });
+    }
+
+    if (attempt.student.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    if (!attempt.quiz.settings.adaptiveMode) {
+      return res.status(400).json({ message: 'This quiz is not in adaptive mode' });
+    }
+
+    // Calculate current performance
+    const answeredQuestions = attempt.answers.length;
+    if (answeredQuestions === 0) {
+      // First question - start with easy
+      const easyQuestion = attempt.quiz.questions.find(q => q.difficulty === 'easy');
+      return res.json({
+        question: easyQuestion,
+        questionNumber: answeredQuestions + 1,
+        performance: null
+      });
+    }
+
+    const correctAnswers = attempt.answers.filter(a => a.isCorrect).length;
+    const currentAccuracy = correctAnswers / answeredQuestions;
+
+    // Determine next difficulty based on performance
+    let nextDifficulty;
+    if (currentAccuracy >= 0.8) {
+      nextDifficulty = 'hard';
+    } else if (currentAccuracy >= 0.6) {
+      nextDifficulty = 'medium';
+    } else {
+      nextDifficulty = 'easy';
+    }
+
+    // Find next question of appropriate difficulty
+    const availableQuestions = attempt.quiz.questions.filter(q => 
+      q.difficulty === nextDifficulty && 
+      !attempt.answers.some(a => a.questionId === q.questionId)
+    );
+
+    if (availableQuestions.length === 0) {
+      // No more questions of this difficulty, try others
+      const allRemainingQuestions = attempt.quiz.questions.filter(q => 
+        !attempt.answers.some(a => a.questionId === q.questionId)
+      );
+      
+      if (allRemainingQuestions.length === 0) {
+        return res.json({
+          message: 'No more questions available',
+          quizComplete: true,
+          performance: {
+            accuracy: currentAccuracy,
+            difficulty: nextDifficulty
+          }
+        });
+      }
+
+      const nextQuestion = allRemainingQuestions[0];
+      return res.json({
+        question: nextQuestion,
+        questionNumber: answeredQuestions + 1,
+        performance: {
+          accuracy: currentAccuracy,
+          difficulty: nextDifficulty
+        }
+      });
+    }
+
+    const nextQuestion = availableQuestions[0];
+    res.json({
+      question: nextQuestion,
+      questionNumber: answeredQuestions + 1,
+      performance: {
+        accuracy: currentAccuracy,
+        difficulty: nextDifficulty
+      }
+    });
+
+  } catch (error) {
+    console.error('Get next adaptive question error:', error);
+    res.status(500).json({ message: 'Error getting next question' });
+  }
+});
 
 module.exports = router;

@@ -28,7 +28,7 @@ const questionSchema = new mongoose.Schema({
   },
   difficulty: {
     type: String,
-    enum: ['easy', 'medium', 'hard'],
+    enum: ['easy', 'medium', 'hard', 'expert', 'master'],
     required: true
   },
   explanation: {
@@ -54,6 +54,11 @@ const quizSchema = new mongoose.Schema({
   instructor: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
+    required: true
+  },
+  class: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Class',
     required: true
   },
   lectureId: {
@@ -92,7 +97,24 @@ const quizSchema = new mongoose.Schema({
     },
     adaptiveMode: {
       type: Boolean,
-      default: true
+      default: false
+    },
+    adaptiveSettings: {
+      questionCount: {
+        type: Number,
+        default: 15
+      },
+      difficultyLevels: [{
+        type: String,
+        enum: ['easy', 'medium', 'hard', 'expert', 'master'],
+        default: ['easy', 'medium', 'hard']
+      }],
+      retakeThreshold: {
+        type: Number,
+        default: 0.6,
+        min: 0,
+        max: 1
+      }
     }
   },
   stats: {

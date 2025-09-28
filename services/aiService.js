@@ -6,7 +6,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 class AIService {
   constructor() {
-    this.gemini = genAI.getGenerativeModel({ model: "gemini-pro" });
+    this.gemini = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
   }
 
   // Extract text from various file formats
@@ -41,24 +41,62 @@ class AIService {
     try {
       const prompt = `
         Analyze the following lecture content and extract the main topics and concepts. 
-        Return a JSON array of topics with their importance weights (1-10).
+        Focus on specific, concrete topics mentioned in the content, not generic categories.
         
         Content:
-        ${text.substring(0, 4000)} // Limit to avoid token limits
+        ${text.substring(0, 4000)}
+        
+        IMPORTANT: Return ONLY valid JSON array, no markdown, no code blocks, no extra text.
+        Extract REAL topics from the content, not generic ones like "General Concepts".
         
         Return format:
         [
-          {"name": "Topic Name", "weight": 8, "description": "Brief description"},
+          {"name": "Specific Topic from Content", "weight": 8, "description": "Brief description based on content"},
           ...
         ]
       `;
 
-      const result = await this.gemini.generateContent(prompt);
+      // Add timeout to the AI service call itself
+      const result = await Promise.race([
+        this.gemini.generateContent(prompt),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini API timeout')), 25000))
+      ]);
+      
       const response = await result.response;
-      const topics = JSON.parse(response.text());
-      return topics;
+      const responseText = response.text();
+      
+      console.log('📚 Topic extraction response length:', responseText.length);
+      console.log('📚 Topic extraction preview:', responseText.substring(0, 200) + '...');
+      
+      // Clean up the response text
+      let cleanText = responseText;
+      
+      // Remove markdown code blocks if present
+      if (cleanText.includes('```json')) {
+        cleanText = cleanText.replace(/```json\s*/, '').replace(/```\s*$/, '');
+      } else if (cleanText.includes('```')) {
+        cleanText = cleanText.replace(/```\s*/, '').replace(/```\s*$/, '');
+      }
+      
+      // Try to extract JSON array
+      const jsonMatch = cleanText.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        try {
+          const topics = JSON.parse(jsonMatch[0]);
+          console.log('✅ Successfully extracted', topics.length, 'topics from content');
+          console.log('📋 Topics:', topics.map(t => t.name).join(', '));
+          return topics;
+        } catch (parseError) {
+          console.error('❌ Topic JSON parse error:', parseError.message);
+        }
+      }
+      
+      // Fallback if no JSON found
+      console.log('❌ No topics found in response, using fallback topics');
+      console.log('❌ Clean text preview:', cleanText.substring(0, 300));
+      return this.getFallbackTopics();
     } catch (error) {
-      console.error('Gemini topic extraction error:', error);
+      console.error('❌ Gemini topic extraction error:', error);
       return this.getFallbackTopics();
     }
   }
@@ -66,7 +104,9 @@ class AIService {
   // Fallback topics when API calls fail
   getFallbackTopics() {
     return [
-      { name: "General Concepts", weight: 5, description: "Main concepts from the lecture" }
+      { name: "General Concepts", weight: 8, description: "Main concepts from the lecture content" },
+      { name: "Key Topics", weight: 6, description: "Important topics covered in the material" },
+      { name: "Core Principles", weight: 7, description: "Fundamental principles discussed in the lecture" }
     ];
   }
 
@@ -98,20 +138,27 @@ class AIService {
   async generateQuestions(text, topics, numQuestions = 10) {
     try {
       const prompt = `
-        Generate ${numQuestions} quiz questions based on the following lecture content.
-        Create a mix of question types: multiple-choice, true/false, and short-answer.
-        Focus on the key concepts and ensure questions test understanding, not just memorization.
+        You are an expert quiz creator. Generate ${numQuestions} high-quality quiz questions based on the lecture content below.
         
-        Lecture Content:
-        ${text.substring(0, 6000)} // Limit content to avoid token limits
+        LECTURE CONTENT:
+        ${text.substring(0, 4000)}
         
-        Topics to focus on: ${topics.map(t => t.name).join(', ')}
+        TOPICS TO FOCUS ON: ${topics.map(t => t.name).join(', ')}
         
-        Return a JSON array with this exact format:
+        REQUIREMENTS:
+        1. Create questions that test REAL understanding of the content
+        2. Use specific details from the lecture content
+        3. Make questions relevant to the actual material
+        4. Vary difficulty levels appropriately
+        5. Ensure questions are clear and unambiguous
+        
+        CRITICAL: Return ONLY valid JSON array, no markdown, no code blocks, no explanations outside the JSON.
+        
+        JSON FORMAT (CRITICAL - Follow this exactly):
         [
           {
             "questionId": "q1",
-            "text": "Question text here?",
+            "text": "Based on the lecture content, what is [specific concept]?",
             "type": "multiple-choice",
             "options": [
               {"text": "Option A", "isCorrect": false},
@@ -120,28 +167,104 @@ class AIService {
               {"text": "Option D", "isCorrect": false}
             ],
             "correctAnswer": "Option B",
-            "topic": "Topic Name",
-            "difficulty": "medium",
-            "explanation": "Explanation of why this answer is correct",
+            "topic": "Specific Topic from Content",
+            "difficulty": "easy",
+            "explanation": "Detailed explanation referencing the lecture content",
             "points": 10
           }
         ]
         
-        Question types:
-        - multiple-choice: 4 options, one correct
-        - true-false: 2 options (True/False)
-        - short-answer: no options, correctAnswer is the expected answer
+        CRITICAL REQUIREMENTS:
+        - difficulty MUST be one of: "easy", "medium", "hard" (not numbers!)
+        - type MUST be one of: "multiple-choice", "true-false", "short-answer"
+        - points should be: 5 for easy, 10 for medium, 15 for hard
         
-        Difficulty levels: easy, medium, hard
-        Points: 5 for easy, 10 for medium, 15 for hard
+        Make sure each question references actual content from the lecture, not generic concepts.
       `;
 
-      const result = await this.gemini.generateContent(prompt);
+      // Add timeout to the AI service call itself
+      const result = await Promise.race([
+        this.gemini.generateContent(prompt),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini API timeout')), 35000))
+      ]);
+      
       const response = await result.response;
-      const questions = JSON.parse(response.text());
-      return questions;
+      const responseText = response.text();
+      
+      console.log('🤖 AI Response length:', responseText.length);
+      console.log('🤖 AI Response preview:', responseText.substring(0, 200) + '...');
+      
+      // Clean up the response text
+      let cleanText = responseText;
+      
+      // Remove markdown code blocks if present
+      if (cleanText.includes('```json')) {
+        cleanText = cleanText.replace(/```json\s*/, '').replace(/```\s*$/, '');
+      } else if (cleanText.includes('```')) {
+        cleanText = cleanText.replace(/```\s*/, '').replace(/```\s*$/, '');
+      }
+      
+      // Try to extract JSON array
+      const jsonMatch = cleanText.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        try {
+          const questions = JSON.parse(jsonMatch[0]);
+          console.log('✅ Successfully parsed', questions.length, 'questions from AI response');
+          
+          // Validate and fix questions
+          const validatedQuestions = questions.map((q, index) => {
+            // Fix difficulty if it's a number or invalid
+            if (typeof q.difficulty === 'number' || !['easy', 'medium', 'hard', 'expert', 'master'].includes(q.difficulty)) {
+              console.log(`⚠️ Fixing invalid difficulty "${q.difficulty}" for question ${index + 1}`);
+              // Map numeric difficulties to string equivalents
+              if (typeof q.difficulty === 'number') {
+                if (q.difficulty === 1 || q.difficulty === '1') q.difficulty = 'easy';
+                else if (q.difficulty === 2 || q.difficulty === '2') q.difficulty = 'medium';
+                else if (q.difficulty === 3 || q.difficulty === '3') q.difficulty = 'hard';
+                else if (q.difficulty === 4 || q.difficulty === '4') q.difficulty = 'expert';
+                else if (q.difficulty === 5 || q.difficulty === '5') q.difficulty = 'master';
+                else q.difficulty = 'medium'; // Default fallback
+              } else {
+                q.difficulty = ['easy', 'medium', 'hard', 'expert', 'master'][index % 5]; // Cycle through valid difficulties
+              }
+            }
+            
+            // Fix type if invalid
+            if (!['multiple-choice', 'true-false', 'short-answer'].includes(q.type)) {
+              console.log(`⚠️ Fixing invalid type "${q.type}" for question ${index + 1}`);
+              q.type = 'multiple-choice';
+            }
+            
+            // Fix options format if needed
+            if (q.options && Array.isArray(q.options) && q.options.length > 0) {
+              if (typeof q.options[0] === 'string') {
+                console.log(`⚠️ Converting string options to object format for question ${index + 1}`);
+                q.options = q.options.map((opt, optIndex) => ({
+                  text: opt,
+                  isCorrect: optIndex === 0 // Default first option as correct
+                }));
+              }
+            }
+            
+            // Set points based on difficulty
+            q.points = q.difficulty === 'easy' ? 5 : q.difficulty === 'medium' ? 10 : q.difficulty === 'hard' ? 15 : q.difficulty === 'expert' ? 20 : 25;
+            
+            return q;
+          });
+          
+          return validatedQuestions;
+        } catch (parseError) {
+          console.error('❌ JSON parse error:', parseError.message);
+          console.log('❌ Failed JSON text:', jsonMatch[0].substring(0, 500));
+        }
+      }
+      
+      // Fallback if no JSON found
+      console.log('❌ No JSON array found in response, using fallback questions');
+      console.log('❌ Clean text preview:', cleanText.substring(0, 300));
+      return this.getFallbackQuestions(numQuestions);
     } catch (error) {
-      console.error('Gemini question generation error:', error);
+      console.error('❌ Gemini question generation error:', error);
       return this.getFallbackQuestions(numQuestions);
     }
   }
@@ -241,6 +364,133 @@ class AIService {
     }
 
     return recommendations;
+  }
+
+  async generateAdaptiveQuestions(content, topics, totalQuestions, difficultyLevels, retakeThreshold) {
+    try {
+      const questionsPerDifficulty = Math.ceil(totalQuestions / difficultyLevels.length);
+      const allQuestions = [];
+
+      for (const difficulty of difficultyLevels) {
+        const prompt = `
+Generate ${questionsPerDifficulty} ${difficulty} difficulty quiz questions based on the following content:
+
+Content: ${content.substring(0, 4000)}
+
+Topics: ${topics.map(t => t.name).join(', ')}
+
+CRITICAL REQUIREMENTS:
+- difficulty MUST be exactly: "${difficulty}" (string, not number!)
+- type MUST be: "multiple-choice"
+- Use the exact JSON format below
+- Make questions test REAL understanding of the content
+
+IMPORTANT: Return ONLY valid JSON array, no markdown, no code blocks, no extra text.
+
+JSON FORMAT:
+[
+  {
+    "questionId": "q1",
+    "text": "Question text here",
+    "type": "multiple-choice",
+    "options": [
+      {"text": "Option A", "isCorrect": false},
+      {"text": "Option B", "isCorrect": true},
+      {"text": "Option C", "isCorrect": false},
+      {"text": "Option D", "isCorrect": false}
+    ],
+    "correctAnswer": "Option B",
+    "topic": "Topic name",
+    "difficulty": "${difficulty}",
+    "explanation": "Explanation of why this answer is correct",
+    "points": ${difficulty === 'easy' ? 5 : difficulty === 'medium' ? 10 : 15}
+  }
+]
+`;
+
+        // Add timeout to the AI service call itself
+        const result = await Promise.race([
+          this.gemini.generateContent(prompt),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini API timeout')), 35000))
+        ]);
+        
+        const response = await result.response;
+        const responseText = response.text();
+        
+        // Clean up the response text
+        let cleanText = responseText;
+        
+        // Remove markdown code blocks if present
+        if (cleanText.includes('```json')) {
+          cleanText = cleanText.replace(/```json\s*/, '').replace(/```\s*$/, '');
+        } else if (cleanText.includes('```')) {
+          cleanText = cleanText.replace(/```\s*/, '').replace(/```\s*$/, '');
+        }
+        
+        // Extract JSON from the response
+        const jsonMatch = cleanText.match(/\[[\s\S]*\]/);
+        if (jsonMatch) {
+          try {
+            const questions = JSON.parse(jsonMatch[0]);
+            
+            // Validate and fix questions
+            const validatedQuestions = questions.map((q, index) => {
+              // Fix difficulty if it's a number or invalid
+              if (typeof q.difficulty === 'number' || !['easy', 'medium', 'hard', 'expert', 'master'].includes(q.difficulty)) {
+                console.log(`⚠️ Fixing invalid difficulty "${q.difficulty}" for adaptive question ${index + 1}`);
+                // Map numeric difficulties to string equivalents
+                if (typeof q.difficulty === 'number') {
+                  if (q.difficulty === 1 || q.difficulty === '1') q.difficulty = 'easy';
+                  else if (q.difficulty === 2 || q.difficulty === '2') q.difficulty = 'medium';
+                  else if (q.difficulty === 3 || q.difficulty === '3') q.difficulty = 'hard';
+                  else if (q.difficulty === 4 || q.difficulty === '4') q.difficulty = 'expert';
+                  else if (q.difficulty === 5 || q.difficulty === '5') q.difficulty = 'master';
+                  else q.difficulty = difficulty; // Use the current difficulty level
+                } else {
+                  q.difficulty = difficulty; // Use the current difficulty level
+                }
+              }
+              
+              // Fix type if invalid
+              if (!['multiple-choice', 'true-false', 'short-answer'].includes(q.type)) {
+                console.log(`⚠️ Fixing invalid type "${q.type}" for adaptive question ${index + 1}`);
+                q.type = 'multiple-choice';
+              }
+              
+              // Fix options format if needed
+              if (q.options && Array.isArray(q.options) && q.options.length > 0) {
+                if (typeof q.options[0] === 'string') {
+                  console.log(`⚠️ Converting string options to object format for adaptive question ${index + 1}`);
+                  q.options = q.options.map((opt, optIndex) => ({
+                    text: opt,
+                    isCorrect: optIndex === 0 // Default first option as correct
+                  }));
+                }
+              }
+              
+              // Set points based on difficulty
+              q.points = q.difficulty === 'easy' ? 5 : q.difficulty === 'medium' ? 10 : q.difficulty === 'hard' ? 15 : q.difficulty === 'expert' ? 20 : 25;
+              
+              return q;
+            });
+            
+            allQuestions.push(...validatedQuestions);
+          } catch (parseError) {
+            console.error('❌ Adaptive JSON parse error:', parseError.message);
+          }
+        }
+      }
+
+      // Shuffle questions and limit to totalQuestions
+      const shuffledQuestions = allQuestions.sort(() => Math.random() - 0.5);
+      return shuffledQuestions.slice(0, totalQuestions);
+
+    } catch (error) {
+      console.error('Adaptive question generation error:', error);
+      
+      // Fallback to standard questions if adaptive generation fails
+      return await this.generateQuestions(content, topics, totalQuestions);
+    }
   }
 }
 

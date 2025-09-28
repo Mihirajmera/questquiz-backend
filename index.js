@@ -8,6 +8,7 @@ const { Server } = require('socket.io');
 require('dotenv').config();
 
 const authRoutes = require('./routes/auth');
+const classRoutes = require('./routes/class');
 const uploadRoutes = require('./routes/upload');
 const quizRoutes = require('./routes/quiz');
 const progressRoutes = require('./routes/progress');
@@ -41,10 +42,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Database connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/questquiz', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/questquiz')
 .then(() => console.log('✅ Connected to MongoDB'))
 .catch(err => {
   console.error('❌ MongoDB connection error:', err);
@@ -53,6 +51,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/questquiz
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/class', classRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/quiz', quizRoutes);
 app.use('/api/progress', progressRoutes);
@@ -104,7 +103,7 @@ app.use('*', (req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8000;
 server.listen(PORT, () => {
   console.log(`🚀 QuestQuiz Backend running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/api/health`);

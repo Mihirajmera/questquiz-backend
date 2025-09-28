@@ -35,7 +35,25 @@ const userSchema = new mongoose.Schema({
   lastLogin: {
     type: Date,
     default: null
-  }
+  },
+  enrolledClasses: [{
+    class: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Class'
+    },
+    joinedAt: {
+      type: Date,
+      default: Date.now
+    },
+    isActive: {
+      type: Boolean,
+      default: true
+    }
+  }],
+  createdClasses: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Class'
+  }]
 }, {
   timestamps: true
 });
